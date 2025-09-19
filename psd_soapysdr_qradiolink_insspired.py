@@ -91,7 +91,7 @@ print("Save to {}".format(rx_signal_path))
 np.save(rx_signal_path, rx_signal)
 
 
-duration = 0.01  # 20 ms
+duration = 0.02  # 20 ms
 num_samples = int(sample_rate * duration)  # Number of samples in the window
 
 # ====== #
@@ -126,8 +126,8 @@ while True:
     )
     """
     low_pass = signal.butter(
-        N=2,
-        Wn=4.8e3,
+        N=10,
+        Wn=9.6e3,
         fs=sample_rate,
         output="sos",
     )
@@ -154,7 +154,7 @@ while True:
     instant_phases = np.unwrap(np.angle(rx_signal), axis=0)
     instant_frequencies = np.diff(instant_phases) / 2 / np.pi * sample_rate
 
-    samples_per_symbol = int(sample_rate // 4800) * 2
+    samples_per_symbol = int(sample_rate // 4800) *2
     samples_per_p = int(len(instant_frequencies) // samples_per_symbol)
 
     time_axis = np.arange(len(instant_frequencies) // samples_per_symbol)

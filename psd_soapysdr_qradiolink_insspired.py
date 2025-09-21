@@ -18,13 +18,77 @@ from fractions import Fraction
 from datetime import datetime
 
 
-plt.ion()
-sample_rate = 4.8e6
+# From https://github.com/veeresht/CommPy/blob/master/commpy/filters.py
+def rrcosfilter(N, alpha, Ts, Fs):
+    """
+    Generates a root raised cosine (RRC) filter (FIR) impulse response.
+
+    Parameters
+    ----------
+    N : int
+        Length of the filter in samples.
+
+    alpha : float
+        Roll off factor (Valid values are [0, 1]).
+
+    Ts : float
+        Symbol period in seconds.
+
+    Fs : float
+        Sampling Rate in Hz.
+
+    Returns
+    ---------
+
+    time_idx : 1-D ndarray of floats
+        Array containing the time indices, in seconds, for
+        the impulse response.
+
+    h_rrc : 1-D ndarray of floats
+        Impulse response of the root raised cosine filter.
+    """
+
+    T_delta = 1 / float(Fs)
+    time_idx = ((np.arange(N) - N / 2)) * T_delta
+    sample_num = np.arange(N)
+    h_rrc = np.zeros(N, dtype=float)
+
+    for x in sample_num:
+        t = (x - N / 2) * T_delta
+        if t == 0.0:
+            h_rrc[x] = 1.0 - alpha + (4 * alpha / np.pi)
+        elif alpha != 0 and t == Ts / (4 * alpha):
+            h_rrc[x] = (alpha / np.sqrt(2)) * (
+                ((1 + 2 / np.pi) * (np.sin(np.pi / (4 * alpha))))
+                + ((1 - 2 / np.pi) * (np.cos(np.pi / (4 * alpha))))
+            )
+        elif alpha != 0 and t == -Ts / (4 * alpha):
+            h_rrc[x] = (alpha / np.sqrt(2)) * (
+                ((1 + 2 / np.pi) * (np.sin(np.pi / (4 * alpha))))
+                + ((1 - 2 / np.pi) * (np.cos(np.pi / (4 * alpha))))
+            )
+        else:
+            h_rrc[x] = (
+                np.sin(np.pi * t * (1 - alpha) / Ts)
+                + 4 * alpha * (t / Ts) * np.cos(np.pi * t * (1 + alpha) / Ts)
+            ) / (np.pi * t * (1 - (4 * alpha * t / Ts) * (4 * alpha * t / Ts)) / Ts)
+
+    return time_idx, h_rrc
+
+
+sample_rate = 2.4e6
 # Duration of the recording [s].
 D = 0.5
 # Number of samples to record.
 N = int(D * sample_rate)
 center_freq = 433.000e6
+
+# Decimation value after first low pass filter
+decimation = int(sample_rate / 48e3)
+
+
+# RRC filter (shape filter)
+rrc_filter = rrcosfilter(501, 0.2, 1 / 4800, int(sample_rate / decimation))[1]
 
 # enumerate devices
 results = SoapySDR.Device.enumerate()
@@ -91,8 +155,7 @@ print("Save to {}".format(rx_signal_path))
 np.save(rx_signal_path, rx_signal)
 
 
-duration = 0.02  # 20 ms
-num_samples = int(sample_rate * duration)  # Number of samples in the window
+duration = 0.015  # 20 ms
 
 # ====== #
 # Mixing #
@@ -106,12 +169,51 @@ rx_signal = rx_signal * mixing_signal
 
 
 rx_signal_full = rx_signal.copy()
+original_sample_rate = sample_rate
 
-while True:
+window_duration = 0.015
+window_offset = 0
 
-    index = int(input("Window index ? :"))
-    plt.close()
-    rx_signal = rx_signal_full[index * num_samples : (index + 1) * num_samples]
+fig, ax = plt.subplots(nrows=3)
+fig.subplots_adjust(left=0.15, right=0.85)
+axwindow_duration = fig.add_axes([0.05, 0.25, 0.01, 0.65])
+window_duration_slider = Slider(
+    ax=axwindow_duration,
+    label="Window duration [s]",
+    valmin=0.001,
+    valmax=D - window_offset,
+    valstep=0.001,
+    valinit=window_duration,
+    orientation="vertical",
+)
+
+axwindow_offset = fig.add_axes([0.95, 0.25, 0.01, 0.65])
+window_offset_slider = Slider(
+    ax=axwindow_offset,
+    label="Window offset [s]",
+    valmin=0,
+    valmax=D - window_duration,
+    valstep=0.001,
+    valinit=window_offset,
+    orientation="vertical",
+)
+
+
+def update(val):
+
+    global window_duration, window_offset
+    window_duration = window_duration_slider.val
+
+    window_offset = min(window_offset_slider.val, D - window_duration)
+    window_offset_slider.valmax = D - window_duration
+    window_offset_slider.ax.set_xlim(0, D - window_duration)
+
+    sample_rate = original_sample_rate
+    num_samples = int(sample_rate * window_duration)  # Number of samples in the window
+    start_sample_index = int(sample_rate * window_offset)
+
+    rx_signal = rx_signal_full[start_sample_index : start_sample_index + num_samples]
+
     # =============== #
     # Low Pass Filter #
     # =============== #
@@ -126,21 +228,23 @@ while True:
     )
     """
     low_pass = signal.butter(
-        N=10,
+        N=15,
         Wn=9.6e3,
         fs=sample_rate,
         output="sos",
     )
+    """
+    low_pass = signal.cheby1(
+        N=5, rp=2, Wn=9.6e3, btype="lowpass", output="sos", fs=sample_rate
+    )
+    """
+
     rx_signal = signal.sosfilt(sos=low_pass, x=rx_signal)
     # rx_signal = np.convolve(rx_signal, low_pass, "same")
     # We decimate by sample_rate/48khz, hence sample rate should be a multiple of 48k
-    # decimation = int(sample_rate / 4.8e3)
-    # rx_signal = signal.decimate(rx_signal, q=decimation, ftype="fir")
-    # sample_rate = int(sample_rate / decimation)
-
-    # ========================= #
-    # Raised Root Cosine Filter #
-    # ========================= #
+    rx_signal = signal.decimate(rx_signal, q=decimation, ftype="fir")
+    sample_rate = int(sample_rate / decimation)
+    print(sample_rate)
 
     # ==== #
     # TODO #
@@ -151,13 +255,20 @@ while True:
     # =============================== #
 
     # The instant frequency is the derivative of the phase
-    instant_phases = np.unwrap(np.angle(rx_signal), axis=0)
-    instant_frequencies = np.diff(instant_phases) / 2 / np.pi * sample_rate
 
-    samples_per_symbol = int(sample_rate // 4800) *2
-    samples_per_p = int(len(instant_frequencies) // samples_per_symbol)
+    samples_per_symbol = int(sample_rate // 4800) * 2
+    instant_phases = np.unwrap(np.angle(rx_signal), axis=0)
+    deviation = 1944
+    instant_frequencies = np.diff(instant_phases) * (
+        samples_per_symbol / (2 * np.pi * deviation)
+    )
 
     time_axis = np.arange(len(instant_frequencies) // samples_per_symbol)
+
+    # ========================= #
+    # Raised Root Cosine Filter #
+    # ========================= #
+    instant_frequencies = np.convolve(rrc_filter, instant_frequencies, "same")
 
     # =============== #
     # Signal Plotting #
@@ -171,15 +282,18 @@ while True:
     # Uncomment this line to plot signal amplitude instead of raw IQ:
     # rx_signal = np.abs(rx_signal)
 
-    plt.figure()
-    ax_time = plt.subplot(3, 1, 1)
+    ax_time = ax[0]
+    ax_time.clear()
     t = np.linspace(0, len(rx_signal) / sample_rate, len(rx_signal))
     ax_time.plot(t, rx_signal)
-    plt.title("Time-Domain")
-    plt.xlabel("Time [s]")
-    plt.ylabel("Magnitude [Complex Number]")
+    ax_time.set_title("Time-Domain")
+    ax_time.set_xlabel("Time [s]")
+    ax_time.set_ylabel("Magnitude [Complex Number]")
 
-    ax_specgram = plt.subplot(3, 1, 2, sharex=ax_time)
+    """
+    ax_specgram = ax[1]
+    ax_specgram.clear()
+    ax_specgram.sharex(ax_time)
     ax_specgram.specgram(
         rx_signal,
         NFFT=256,
@@ -196,16 +310,31 @@ while True:
         mode="default",
         scale="default",
     )
-    plt.title("Spectrogram")
-    plt.xlabel("Time [s]")
-    plt.ylabel("Frequency (Hz)")
+    ax_specgram.set_title("Spectrogram")
+    ax_specgram.set_xlabel("Time [s]")
+    ax_specgram.set_ylabel("Frequency (Hz)")
+    """
 
-    ax_frequency = plt.subplot(3, 1, 3)
+    ax_iq = ax[1]
+    ax_iq.clear()
+    ax_iq.plot(np.real(rx_signal), np.imag(rx_signal), "x")
+    ax_iq.set_title("Complex Plan")
+    ax_iq.set_xlabel("Re")
+    ax_iq.set_ylabel("Im")
+
+    ax_frequency = ax[2]
+    ax_frequency.clear()
     for i in range(0, len(instant_frequencies), samples_per_symbol):
         f = instant_frequencies[i : i + samples_per_symbol]
         time_axis = np.arange(len(f))
         ax_frequency.plot(time_axis, f)
-    plt.title("Instanteneous frequencies")
-    plt.ylabel("Instantaneous Frequency [Something])")
-    plt.xlabel("Sample Index per Symbol")
-    plt.show()
+    ax_frequency.set_title("Instanteneous frequencies")
+    ax_frequency.set_ylabel("Instantaneous Frequency [Something])")
+    ax_frequency.set_xlabel("Sample Index per Symbol")
+    fig.canvas.draw_idle()
+
+
+window_duration_slider.on_changed(update)
+window_offset_slider.on_changed(update)
+update(0)
+plt.show()

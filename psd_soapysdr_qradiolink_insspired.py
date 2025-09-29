@@ -159,6 +159,7 @@ def rrcosfilter(N, alpha, Ts, Fs):
 
     return time_idx, h_rrc
 
+# not used ! (je fais un truc avec la variance dégeulasse mais ça passe)
 
 # Mueller & Mueller PLL implementation from pysdr
 # Used to synchronize the clock for sampling the frequencies at the correct time
@@ -193,7 +194,7 @@ def m_and_m_pll(samples, sps):
 # thanks https://github.com/thomastoye/dmr-from-scratch/blob/master/dmrpy/layer_1/audio_to_symbols.py , modified but idea came from that !
 
 
-# On calcule la variance (déviation standard) pour chaque offset de samples per symbol pour voir lequel on utilise pour samplé les symboles
+# On calcule la variance (déviation standard) pour chaque offset de samples per symbol pour voir lequel on utilise pour sampler les symboles
 def find_best_phase_offset_and_std(instant_frequencies, samples_per_symbol):
     L = (len(instant_frequencies) // samples_per_symbol) * samples_per_symbol
     arr = (
@@ -206,8 +207,8 @@ def find_best_phase_offset_and_std(instant_frequencies, samples_per_symbol):
     return best_offset, float(std_values[best_offset])
 
 
-def create_frequency_bins(instant_frequencies, samples_per_symbol, offset):
-    sampled = instant_frequencies[offset::samples_per_symbol]
+def create_frequency_bins(instant_frequencies):
+    sampled = instant_frequencies
 
     # compute robust middle using percentiles
     # On va créer nos valeurs limites de bins selon le milieu de nos fréquences (pas forcément 0) pour trier les symboles
@@ -228,7 +229,8 @@ def create_frequency_bins(instant_frequencies, samples_per_symbol, offset):
     return bins
 
 
-SYMBOLS = np.array([0, 3, 1, -1, -3], dtype=int)
+# SYMBOLS = np.array([0, 3, 1, -1, -3], dtype=int)
+SYMBOLS = np.array([0, -3, -1, 1, 3], dtype=np.int32)
 
 
 def frequencies_to_symbols(instant_frequencies, bins):
@@ -272,6 +274,40 @@ _SYMBOL_TO_BITS = {
 }
 
 
+def frequencies_to_symbols(instant_frequencies, bins):
+    # bin indices 1..len(bins)-1; values outside map to 0 or len(bins)
+    idx = np.digitize(instant_frequencies, bins, right=True)
+
+    idx_clamped = np.clip(
+        idx, 1, len(bins) - 1
+    )  # clip pour avoir les values sûr dans les bornes
+    symbols = SYMBOLS[idx_clamped]
+
+    # Calculer la zone entre les bins (leur zone de validité quoi, les thresholds)
+    left_edges = bins[:-1]
+    right_edges = bins[1:]
+    middles = (left_edges + right_edges) * 0.5
+    half_widths = (right_edges - left_edges) * 0.5
+
+    # index into middles/half_widths using idx_clamped-1
+    mid = middles[idx_clamped - 1]
+    hw = half_widths[idx_clamped - 1]
+
+    # pour pas avoir de division par 0 si on a un truc qui tombe pile
+    with np.errstate(divide="ignore", invalid="ignore"):
+        certainty = 1.0 - (np.abs(instant_frequencies - mid) / hw)
+    certainty = np.where(hw == 0, 0.0, certainty)
+    certainty = np.clip(certainty, 0.0, 1.0)
+
+    out = np.empty(
+        instant_frequencies.shape, dtype=[("symbol", "i4"), ("certainty", "f8")]
+    )
+    out["symbol"] = symbols
+    out["certainty"] = certainty
+    return out
+
+
+# TODO : refractor to handle 8 bits per 8 bits
 def symbols_to_hex(symbols):
     # materialize and validate
     arr = np.asarray(list(symbols))
@@ -299,7 +335,7 @@ def symbols_to_hex(symbols):
     return "".join(f"{b:02x}" for b in bytes_arr)
 
 
-sample_rate = 2.4e6
+sample_rate = 4.8e6
 # Duration of the recording [s].
 D = 0.5
 # Number of samples to record.
@@ -312,6 +348,7 @@ decimation = int(sample_rate / 48e3)
 
 # RRC filter (shape filter)
 rrc_filter = rrcosfilter(85, 0.2, 1 / 4800, int(sample_rate / decimation))[1]
+rrc_filter = RRCOS_FILTER
 # enumerate devices
 results = SoapySDR.Device.enumerate()
 for result in results:
@@ -452,12 +489,8 @@ def update(val):
         fs=sample_rate,
     )
     """
-    low_pass = signal.butter(
-        N=15,
-        Wn=9.6e3,
-        fs=sample_rate,
-        output="sos",
-    )
+    low_pass = signal.butter(N=5, Wn=9.6e3, fs=sample_rate, output="sos", btype="low")
+
     """
     low_pass = signal.cheby1(
         N=5, rp=2, Wn=9.6e3, btype="lowpass", output="sos", fs=sample_rate
@@ -486,8 +519,10 @@ def update(val):
 
     samples_per_symbol = sample_rate // 4800
     instant_phases = np.unwrap(np.angle(rx_signal), axis=0)
-    deviation = 1944
-    instant_frequencies = np.diff(instant_phases)
+    instant_frequencies = np.diff(instant_phases) 
+    #instant_frequencies = np.diff(instant_phases) * (2 * np.pi * (1 / sample_rate))
+    # si je transforme en hz, j'ai des valeurs très petites d'IF. Ok chaque sample est très proche mais j'ai "que" 10 sps...
+    # en soit ça change rien mais y'a ptetre un pb, les valeurs me paraissent bizarres
 
     time_axis = np.arange(len(instant_frequencies) // samples_per_symbol)
 
@@ -496,6 +531,21 @@ def update(val):
     # ========================= #
     # instant_frequencies = np.convolve(rrc_filter, instant_frequencies, "same")
     instant_frequencies = signal.lfilter(rrc_filter, 1, instant_frequencies)
+
+    # =================================== #
+    # Moving averager  #
+    # =================================== #
+
+    """
+    print("MOVING AVERAGE")
+    print(len(instant_frequencies))
+    instant_frequencies = moving_average(
+        instant_frequencies[offset::], samples_per_symbol
+    )
+    print(len(instant_frequencies))
+    """
+
+    # instant_frequencies= signal.sosfilt(sos=moving_averager, x=instant_frequencies)
 
     # ======================= #
     # Mueller and Mueller PLL #
@@ -568,13 +618,14 @@ def update(val):
         sample_rate / -2.0, sample_rate / 2.0, sample_rate / len(instant_frequencies)
     )  # début, fin, pas, centré autour de 0 Hz
     ax_iq.plot(f, PSD_shifted)
+
     """
 
     ax_frequency = ax[2]
     ax_frequency.clear()
 
-    for i in range(0, len(instant_frequencies), samples_per_symbol):
-        f_one_sample = instant_frequencies[i : i + samples_per_symbol]
+    for i in range(0, len(instant_frequencies), samples_per_symbol * 2):
+        f_one_sample = instant_frequencies[i : i + samples_per_symbol * 2]
         time_axis = np.arange(len(f_one_sample))
         ax_frequency.plot(time_axis, f_one_sample)
 
@@ -582,15 +633,9 @@ def update(val):
     ax_frequency.set_ylabel("Instantaneous Frequency [Something])")
     ax_frequency.set_xlabel("Sample Index per Symbol")
 
-    """
-    ax_frequency = ax[2]
-    ax_frequency.clear()
-    time_axis = np.arange(len(instant_frequencies))
-    ax_frequency.plot(time_axis, instant_frequencies)
-    ax_frequency.set_title("Instanteneous frequencies")
-    ax_frequency.set_ylabel("Instantaneous Frequency [Something])")
-    ax_frequency.set_xlabel("Sample Index per Symbol")
-    """
+    # =================================== #
+    # Standard deviation to choose offset #
+    # =================================== #
 
     offset, std = find_best_phase_offset_and_std(
         instant_frequencies, samples_per_symbol
@@ -599,11 +644,29 @@ def update(val):
 
     print("IF avant decim : " + str(len(instant_frequencies)))
     instant_frequencies = instant_frequencies[offset::samples_per_symbol]
-    bins = create_frequency_bins(instant_frequencies, samples_per_symbol, offset)
+    ax_frequency = ax[1]
+    ax_frequency.clear()
+    time_axis = np.arange(len(instant_frequencies))
+    ax_frequency.plot(time_axis, instant_frequencies, "ro")
+    ax_frequency.set_title("Instanteneous frequencies")
+    ax_frequency.set_ylabel("Instantaneous Frequency [Something])")
+    ax_frequency.set_xlabel("Sample Index per Symbol")
+    # Add vertical lines for each threshold
+    bins = create_frequency_bins(instant_frequencies)
+    for i, edge in enumerate(bins):
+        ax_frequency.axhline(
+            edge,
+            color="gray",
+            linestyle="--",
+            linewidth=1,
+            label="Threshold" if i == 0 else None,
+        )
+
     out = frequencies_to_symbols(instant_frequencies, bins)
-    print(out)
-    print(out["symbol"])
-    print(symbols_to_hex(out["symbol"]))
+    symbols = out["symbol"]
+    print(len(symbols))
+    print(symbols)
+    print(symbols_to_hex(symbols))
 
     fig.canvas.draw_idle()
 

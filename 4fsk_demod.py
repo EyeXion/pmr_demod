@@ -17,6 +17,8 @@ from threading import Thread
 from fractions import Fraction
 from datetime import datetime
 
+
+# RRC filter taps (dunno how they calculated it, but it works for 48kHz)
 RRCOS_FILTER = [
     +0.0273676736,
     +0.0190682959,
@@ -100,96 +102,6 @@ RRCOS_FILTER = [
     +0.0190682959,
     +0.0273676736,
 ]
-
-
-# From https://github.com/veeresht/CommPy/blob/master/commpy/filters.py
-def rrcosfilter(N, alpha, Ts, Fs):
-    """
-    Generates a root raised cosine (RRC) filter (FIR) impulse response.
-
-    Parameters
-    ----------
-    N : int
-        Length of the filter in samples.
-
-    alpha : float
-        Roll off factor (Valid values are [0, 1]).
-
-    Ts : float
-        Symbol period in seconds.
-
-    Fs : float
-        Sampling Rate in Hz.
-
-    Returns
-    ---------
-
-    time_idx : 1-D ndarray of floats
-        Array containing the time indices, in seconds, for
-        the impulse response.
-
-    h_rrc : 1-D ndarray of floats
-        Impulse response of the root raised cosine filter.
-    """
-
-    T_delta = 1 / float(Fs)
-    time_idx = ((np.arange(N) - N / 2)) * T_delta
-    sample_num = np.arange(N)
-    h_rrc = np.zeros(N, dtype=float)
-
-    for x in sample_num:
-        t = (x - N / 2) * T_delta
-        if t == 0.0:
-            h_rrc[x] = 1.0 - alpha + (4 * alpha / np.pi)
-        elif alpha != 0 and t == Ts / (4 * alpha):
-            h_rrc[x] = (alpha / np.sqrt(2)) * (
-                ((1 + 2 / np.pi) * (np.sin(np.pi / (4 * alpha))))
-                + ((1 - 2 / np.pi) * (np.cos(np.pi / (4 * alpha))))
-            )
-        elif alpha != 0 and t == -Ts / (4 * alpha):
-            h_rrc[x] = (alpha / np.sqrt(2)) * (
-                ((1 + 2 / np.pi) * (np.sin(np.pi / (4 * alpha))))
-                + ((1 - 2 / np.pi) * (np.cos(np.pi / (4 * alpha))))
-            )
-        else:
-            h_rrc[x] = (
-                np.sin(np.pi * t * (1 - alpha) / Ts)
-                + 4 * alpha * (t / Ts) * np.cos(np.pi * t * (1 + alpha) / Ts)
-            ) / (np.pi * t * (1 - (4 * alpha * t / Ts) * (4 * alpha * t / Ts)) / Ts)
-
-    return time_idx, h_rrc
-
-# not used ! (je fais un truc avec la variance dégeulasse mais ça passe)
-
-# Mueller & Mueller PLL implementation from pysdr
-# Used to synchronize the clock for sampling the frequencies at the correct time
-def m_and_m_pll(samples, sps):
-    mu = 0  # initial estimate of phase of sample
-    out = np.zeros(len(samples) + 10, dtype=np.complex64)
-    out_rail = np.zeros(
-        len(samples) + 10, dtype=np.complex64
-    )  # stores values, each iteration we need the previous 2 values plus current value
-    i_in = 0  # input samples index
-    i_out = 2  # output index (let first two outputs be 0)
-    while i_out < len(samples) and i_in + 16 < len(samples):
-        out[i_out] = samples[i_in]  # grab what we think is the "best" sample
-        out_rail[i_out] = int(np.real(out[i_out]) > 0) + 1j * int(
-            np.imag(out[i_out]) > 0
-        )
-        x = (out_rail[i_out] - out_rail[i_out - 2]) * np.conj(out[i_out - 1])
-        y = (out[i_out] - out[i_out - 2]) * np.conj(out_rail[i_out - 1])
-        mm_val = np.real(y - x)
-        mu += sps + 0.3 * mm_val
-        i_in += int(
-            np.floor(mu)
-        )  # round down to nearest int since we are using it as an index
-        mu = mu - np.floor(mu)  # remove the integer part of mu
-        i_out += 1  # increment output index
-    out = out[
-        2:i_out
-    ]  # remove the first two, and anything after i_out (that was never filled out)
-    return out
-
 
 # thanks https://github.com/thomastoye/dmr-from-scratch/blob/master/dmrpy/layer_1/audio_to_symbols.py , modified but idea came from that !
 
@@ -335,21 +247,57 @@ def symbols_to_hex(symbols):
     return "".join(f"{b:02x}" for b in bytes_arr)
 
 
+# ============== #
+# SDR parameters #
+# ============== #
+
+
 sample_rate = 4.8e6
 # Duration of the recording [s].
 D = 0.5
 # Number of samples to record.
 N = int(D * sample_rate)
 center_freq = 433.000e6
-
 # Decimation value after first low pass filter
 decimation = int(sample_rate / 48e3)
 
 
-# RRC filter (shape filter)
-#rrc_filter = rrcosfilter(85, 0.2, 1 / 4800, int(sample_rate / decimation))[1] 
-# the one with rrcosfilter doesnt work ! (maybe tweak parameters)
-rrc_filter = RRCOS_FILTER
+# ============================ #
+# Figure and time window setup #
+# ============================ #
+
+window_duration = 0.0275
+window_offset = 0
+
+fig, ax = plt.subplots(nrows=3)
+fig.subplots_adjust(left=0.15, right=0.85)
+axwindow_duration = fig.add_axes([0.05, 0.25, 0.01, 0.65])
+window_duration_slider = Slider(
+    ax=axwindow_duration,
+    label="Window duration [s]",
+    valmin=1 / 4800,
+    valmax=D - window_offset,
+    valstep=0.001,
+    valinit=window_duration,
+    orientation="vertical",
+)
+
+axwindow_offset = fig.add_axes([0.95, 0.25, 0.01, 0.65])
+window_offset_slider = Slider(
+    ax=axwindow_offset,
+    label="Window offset [s]",
+    valmin=0,
+    valmax=D - window_duration,
+    valstep=1 / 9600,
+    valinit=window_offset,
+    orientation="vertical",
+)
+
+
+# ========= #
+# SDR setup #
+# ========= #
+
 # enumerate devices
 results = SoapySDR.Device.enumerate()
 for result in results:
@@ -370,6 +318,10 @@ sdr.setGain(SOAPY_SDR_RX, 0, "VGA", 0)
 
 rx_stream = sdr.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32)
 sdr.activateStream(rx_stream)
+
+# =========== #
+# SDR capture #
+# =========== #
 
 # Create a re-usable buffer for RX samples.
 # - The optimal buffer size is a user choice depending on the used SDR and the sampling rate.
@@ -407,6 +359,10 @@ rx_signal = rx_signal[:N]
 sdr.deactivateStream(rx_stream)
 sdr.closeStream(rx_stream)
 
+# ============ #
+# Save capture #
+# ============ #
+
 date = datetime.now().strftime("%Y%m%d_%H_%M_%S%m")
 rx_signal_path = "DMRCapture_HackRF_" + str(int(sample_rate)) + "Hz_" + date + ".npy"
 
@@ -414,9 +370,8 @@ print("Signal samples: {}".format(len(rx_signal)))
 print("Save to {}".format(rx_signal_path))
 np.save(rx_signal_path, rx_signal)
 
+# Uncomment to load a file...
 # rx_signal = np.load("DMRCapture_HackRF_2400000Hz_20250922_09_32_4709.npy")
-
-duration = 0.015  # 20 ms
 
 # ====== #
 # Mixing #
@@ -432,35 +387,17 @@ rx_signal = rx_signal * mixing_signal
 rx_signal_full = rx_signal.copy()
 original_sample_rate = sample_rate
 
-window_duration = 0.0275
-window_offset = 0
 
-fig, ax = plt.subplots(nrows=3)
-fig.subplots_adjust(left=0.15, right=0.85)
-axwindow_duration = fig.add_axes([0.05, 0.25, 0.01, 0.65])
-window_duration_slider = Slider(
-    ax=axwindow_duration,
-    label="Window duration [s]",
-    valmin=1 / 4800,
-    valmax=D - window_offset,
-    valstep=0.001,
-    valinit=window_duration,
-    orientation="vertical",
-)
-
-axwindow_offset = fig.add_axes([0.95, 0.25, 0.01, 0.65])
-window_offset_slider = Slider(
-    ax=axwindow_offset,
-    label="Window offset [s]",
-    valmin=0,
-    valmax=D - window_duration,
-    valstep=1 / 9600,
-    valinit=window_offset,
-    orientation="vertical",
-)
+# ========================= #
+# Process window of capture #
+# ========================= #
 
 
+# Gets called when we touch a value in the plot (for the window size or offset)
 def update(val):
+    # =============================== #
+    # Fecth the samples in the window #
+    # =============================== #
 
     global window_duration, window_offset
     window_duration = window_duration_slider.val
@@ -491,7 +428,6 @@ def update(val):
     )
     """
     low_pass = signal.butter(N=5, Wn=9.6e3, fs=sample_rate, output="sos", btype="low")
-
     """
     low_pass = signal.cheby1(
         N=5, rp=2, Wn=9.6e3, btype="lowpass", output="sos", fs=sample_rate
@@ -520,8 +456,8 @@ def update(val):
 
     samples_per_symbol = sample_rate // 4800
     instant_phases = np.unwrap(np.angle(rx_signal), axis=0)
-    instant_frequencies = np.diff(instant_phases) 
-    #instant_frequencies = np.diff(instant_phases) * (2 * np.pi * (1 / sample_rate))
+    instant_frequencies = np.diff(instant_phases)
+    # instant_frequencies = np.diff(instant_phases) * (2 * np.pi * (1 / sample_rate))
     # si je transforme en hz, j'ai des valeurs très petites d'IF. Ok chaque sample est très proche mais j'ai "que" 10 sps...
     # en soit ça change rien mais y'a ptetre un pb, les valeurs me paraissent bizarres
 
@@ -530,28 +466,19 @@ def update(val):
     # ========================= #
     # Raised Root Cosine Filter #
     # ========================= #
+
+    # Utile pour éviter l'inter symbol interference (et obligatoire car "demi" filtre, appliqué en Rx et Tx)
     # instant_frequencies = np.convolve(rrc_filter, instant_frequencies, "same")
-    instant_frequencies = signal.lfilter(rrc_filter, 1, instant_frequencies)
+    instant_frequencies = signal.lfilter(RRCOS_FILTER, 1, instant_frequencies)
 
-    # =================================== #
-    # Moving averager  #
-    # =================================== #
+    # ======================================================= #
+    #  Standard deviation to chosse sample per symbol to use) #
+    # ======================================================= #
 
-    """
-    print("MOVING AVERAGE")
-    print(len(instant_frequencies))
-    instant_frequencies = moving_average(
-        instant_frequencies[offset::], samples_per_symbol
+    offset, std = find_best_phase_offset_and_std(
+        instant_frequencies, samples_per_symbol
     )
-    print(len(instant_frequencies))
-    """
-
-    # instant_frequencies= signal.sosfilt(sos=moving_averager, x=instant_frequencies)
-
-    # ======================= #
-    # Mueller and Mueller PLL #
-    # ======================= #
-    # instant_frequencies = m_and_m_pll(instant_frequencies, samples_per_symbol)
+    print((offset, std))
 
     # =============== #
     # Signal Plotting #
@@ -565,6 +492,7 @@ def update(val):
     # Uncomment this line to plot signal amplitude instead of raw IQ:
     # rx_signal = np.abs(rx_signal)
 
+    # Time Domain
     ax_time = ax[0]
     ax_time.clear()
     t = np.linspace(0, len(rx_signal) / sample_rate, len(rx_signal)) + window_offset
@@ -573,6 +501,7 @@ def update(val):
     ax_time.set_xlabel("Time [s]")
     ax_time.set_ylabel("Magnitude [Complex Number]")
 
+    # Specgram
     """
     ax_specgram = ax[1]
     ax_specgram.clear()
@@ -598,6 +527,7 @@ def update(val):
     ax_specgram.set_ylabel("Frequency (Hz)")
     """
 
+    # IQ (constellation)
     """
     ax_iq = ax[1]
     ax_iq.clear()
@@ -608,6 +538,7 @@ def update(val):
 
     """
 
+    # FFT des IF (pas très utile ?)
     """
     ax_iq = ax[1]
     ax_iq.clear()
@@ -622,6 +553,7 @@ def update(val):
 
     """
 
+    # Diagramme de l'oeil
     ax_frequency = ax[2]
     ax_frequency.clear()
 
@@ -634,16 +566,10 @@ def update(val):
     ax_frequency.set_ylabel("Instantaneous Frequency [Something])")
     ax_frequency.set_xlabel("Sample Index per Symbol")
 
-    # =================================== #
-    # Standard deviation to choose offset #
-    # =================================== #
+    # ========================== #
+    # Symbol retrieving and plot #
+    # ========================== #
 
-    offset, std = find_best_phase_offset_and_std(
-        instant_frequencies, samples_per_symbol
-    )
-    print((offset, std))
-
-    print("IF avant decim : " + str(len(instant_frequencies)))
     instant_frequencies = instant_frequencies[offset::samples_per_symbol]
     ax_frequency = ax[1]
     ax_frequency.clear()

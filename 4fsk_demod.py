@@ -144,7 +144,6 @@ def create_frequency_bins(instant_frequencies):
 # SYMBOLS = np.array([0, 3, 1, -1, -3], dtype=int)
 SYMBOLS = np.array([0, -3, -1, 1, 3], dtype=np.int32)
 
-
 def frequencies_to_symbols(instant_frequencies, bins):
     # bin indices 1..len(bins)-1; values outside map to 0 or len(bins)
     idx = np.digitize(instant_frequencies, bins, right=True)
@@ -246,6 +245,33 @@ def symbols_to_hex(symbols):
     # format as hex string
     return "".join(f"{b:02x}" for b in bytes_arr)
 
+def symbols_to_hex2(symbols):
+    # materialize and validate
+    arr = np.asarray(list(symbols))
+    if arr.size == 0:
+        return ""
+
+    try:
+        bits_list = [_SYMBOL_TO_BITS[int(s)] for s in arr]
+    except KeyError as e:
+        raise ValueError(f"invalid symbol: {e}") from None
+
+    bitstream = "".join(bits_list)  # e.g. "010011..." length = 2 * N
+
+    # pad to full nibbles (4 bits) by adding '0' bits at the end (LSB side)
+    rem = len(bitstream) % 4
+    if rem:
+        pad = 4 - rem
+        bitstream += "0" * pad
+
+    # convert each 4-bit chunk to a nibble (0-15)
+    nnibbles = len(bitstream) // 4
+    nibble_vals = [int(bitstream[i * 4 : (i + 1) * 4], 2) for i in range(nnibbles)]
+
+    # format as hex string (one hex digit per nibble)
+    return "".join(f"{n:x}" for n in nibble_vals)
+
+
 
 # ============== #
 # SDR parameters #
@@ -254,7 +280,7 @@ def symbols_to_hex(symbols):
 
 sample_rate = 4.8e6
 # Duration of the recording [s].
-D = 0.5
+D = 1
 # Number of samples to record.
 N = int(D * sample_rate)
 center_freq = 433.000e6
@@ -266,7 +292,7 @@ decimation = int(sample_rate / 48e3)
 # Figure and time window setup #
 # ============================ #
 
-window_duration = 0.0275
+window_duration = 0.028
 window_offset = 0
 
 fig, ax = plt.subplots(nrows=3)
@@ -288,7 +314,7 @@ window_offset_slider = Slider(
     label="Window offset [s]",
     valmin=0,
     valmax=D - window_duration,
-    valstep=1 / 9600,
+    valstep=0.001,
     valinit=window_offset,
     orientation="vertical",
 )
@@ -306,6 +332,7 @@ for result in results:
 # create device instance
 # args can be user defined or from the enumeration result
 args = dict(driver="hackrf")
+#args = dict(driver="lime")
 sdr = SoapySDR.Device(args)
 
 # apply settings
@@ -593,7 +620,7 @@ def update(val):
     symbols = out["symbol"]
     print(len(symbols))
     print(symbols)
-    print(symbols_to_hex(symbols))
+    print(symbols_to_hex2(symbols))
 
     fig.canvas.draw_idle()
 

@@ -159,7 +159,9 @@ def rrcosfilter(N, alpha, Ts, Fs):
 
     return time_idx, h_rrc
 
+
 # not used ! (je fais un truc avec la variance dégeulasse mais ça passe)
+
 
 # Mueller & Mueller PLL implementation from pysdr
 # Used to synchronize the clock for sampling the frequencies at the correct time
@@ -347,7 +349,7 @@ decimation = int(sample_rate / 48e3)
 
 
 # RRC filter (shape filter)
-#rrc_filter = rrcosfilter(85, 0.2, 1 / 4800, int(sample_rate / decimation))[1] 
+# rrc_filter = rrcosfilter(85, 0.2, 1 / 4800, int(sample_rate / decimation))[1]
 # the one with rrcosfilter doesnt work ! (maybe tweak parameters)
 rrc_filter = RRCOS_FILTER
 # enumerate devices
@@ -520,8 +522,8 @@ def update(val):
 
     samples_per_symbol = sample_rate // 4800
     instant_phases = np.unwrap(np.angle(rx_signal), axis=0)
-    instant_frequencies = np.diff(instant_phases) 
-    #instant_frequencies = np.diff(instant_phases) * (2 * np.pi * (1 / sample_rate))
+    instant_frequencies = np.diff(instant_phases)
+    # instant_frequencies = np.diff(instant_phases) * (2 * np.pi * (1 / sample_rate))
     # si je transforme en hz, j'ai des valeurs très petites d'IF. Ok chaque sample est très proche mais j'ai "que" 10 sps...
     # en soit ça change rien mais y'a ptetre un pb, les valeurs me paraissent bizarres
 

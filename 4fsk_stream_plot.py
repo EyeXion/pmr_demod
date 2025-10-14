@@ -4,6 +4,7 @@ import numpy as np
 from scipy import signal
 import time
 import matplotlib.pyplot as plt
+from math import ceil
 
 # ================= #
 # Demodulator Class #
@@ -539,11 +540,16 @@ class DMRStreamDemodulator:
 
         return hex_output
 
+
+    def get_good_burst_start(self, rx_signal):
+        pass
+
     def process_stream(self):
         self.setup_sdr()
         self._setup_plot()
 
         buff_len = 128
+        chunks_per_burst = ceil((self.sample_rate * 0.0275) / buff_len)
         rx_buff = np.array([0] * buff_len, np.complex64)
         in_burst, burst_buffer, silence_counter, samples_in_burst = False, [], 0, 0
 
@@ -617,7 +623,7 @@ if __name__ == "__main__":
         center_freq=433.000e6,
         burst_threshold=0.2,
         silence_chunks=5,
-        max_burst_duration=0.0275,
+        max_burst_duration=0.028,
         enable_plotting=True,
     )
     demodulator.process_stream()

@@ -391,11 +391,11 @@ sdr.closeStream(rx_stream)
 # ============ #
 
 date = datetime.now().strftime("%Y%m%d_%H_%M_%S%m")
-rx_signal_path = "DMRCapture_HackRF_" + str(int(sample_rate)) + "Hz_" + date + ".npy"
+rx_signal_path = "samples/DMRCapture_HackRF_" + str(int(sample_rate)) + "Hz_" + date + ".npy"
 
-print("Signal samples: {}".format(len(rx_signal)))
-print("Save to {}".format(rx_signal_path))
-np.save(rx_signal_path, rx_signal)
+#print("Signal samples: {}".format(len(rx_signal)))
+#print("Save to {}".format(rx_signal_path))
+#np.save(rx_signal_path, rx_signal)
 
 # Uncomment to load a file...
 # rx_signal = np.load("DMRCapture_HackRF_2400000Hz_20250922_09_32_4709.npy")

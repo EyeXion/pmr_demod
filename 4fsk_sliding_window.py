@@ -5,12 +5,14 @@ from scipy import signal
 import time
 import matplotlib.pyplot as plt
 from math import ceil
+from threading import Thread, Event
+from queue import Queue
 
 # ================= #
 # Demodulator Class #
 # ================= #
 SYMBOLS = np.array([0, 3, 1, -1, -3], dtype=int)
-#SYMBOLS = np.array([0, -3, -1, 1, 3], dtype=np.int32)
+# SYMBOLS = np.array([0, -3, -1, 1, 3], dtype=np.int32)
 
 
 _SYMBOL_TO_BITS = {
@@ -150,6 +152,10 @@ class DMRStreamDemodulator:
             self.center_freq - 433.5815e6
         )  # If talkie frequency is 433.575Mhz, center of signal is at 433.582Mhz
 
+        self.listening_event = Event()
+        self.listening_event.set()
+        self.buffer_queue = Queue()
+
     def _setup_plot(self):
         """Initializes the matplotlib figure and axes in interactive mode."""
         if self.enable_plotting:
@@ -252,7 +258,6 @@ class DMRStreamDemodulator:
         target_length = int(
             self.sample_rate * 0.0299
         )  # duration of burst data is 0.0275 sec
-        print(target_length)
         return arr[
             (len(arr) - target_length + 1) // 2 : (len(arr) - target_length + 1) // 2
             + target_length
@@ -352,12 +357,9 @@ class DMRStreamDemodulator:
     def detect_sync_pattern(self, hex_string):
         # Extract the substring from index 27 to 39 (108 bit par demis paquets
         potential_sync = hex_string[27:40]
-        print(potential_sync)
-        print(len(potential_sync))
 
         # Check for each sync pattern
         for pattern_name, pattern_value in SYNC_PATTERNS.items():
-            print(len(pattern_value))
             if pattern_value in potential_sync:
                 return pattern_name
 
@@ -373,8 +375,6 @@ class DMRStreamDemodulator:
         # We decimate by sample_rate/48khz, hence sample rate should be a multiple of 48k
         rx_signal = signal.decimate(rx_signal, q=self.decimation, ftype="fir")
         sample_rate = int(self.sample_rate / self.decimation)
-        print("SAMPLE RATE AFTER DECIM : " + str(sample_rate))
-        print(sample_rate)
         return rx_signal
 
     def demodulate_burst(self, burst_data):
@@ -454,6 +454,7 @@ class DMRStreamDemodulator:
         symbols = out["symbol"]
         hex_output = self.symbols_to_hex(symbols)
 
+        """
         self.plot_burst_analysis(
             rx_signal,
             instant_frequencies,
@@ -461,6 +462,7 @@ class DMRStreamDemodulator:
             bins,
             samples_per_symbol,
         )
+        """
 
         return hex_output
 
@@ -468,76 +470,75 @@ class DMRStreamDemodulator:
     def get_rolling_window(self, rx_signal, window=132 * 10):
         return np.lib.stride_tricks.sliding_window_view(rx_signal, window)
 
+    def retrieve_samples(self, num_samples):
+        samples_retrieved = []
+        while num_samples > 0:
+            if not self.buffer_queue.empty():
+                chunk = self.buffer_queue.get()
+                samples_retrieved.append(chunk)
+                num_samples -= len(chunk)
+        return np.concatenate(samples_retrieved)
+
+    def _rx_streaming_thread(self):
+        buff_len = 4096
+        while self.listening_event.is_set():
+            rx_buff = np.array([0] * buff_len, np.complex64)
+            sr = self.sdr.readStream(
+                self.rx_stream, [rx_buff], buff_len, timeoutUs=5000000
+            )
+
+            if sr.ret < 0:
+                print(f"Error reading stream: {sr.ret}")
+                continue
+            self.buffer_queue.put(rx_buff[: sr.ret])
+
     def process_stream(self):
         self.setup_sdr()
         self._setup_plot()
 
-        buff_len = 128
-        samples_per_burst = ceil((self.sample_rate * 0.03))  # some margin
-        rx_buff = np.array([0] * buff_len, np.complex64)
-        in_burst, burst_buffer, silence_counter, samples_in_burst = False, [], 0, 0
+        rx_thread = Thread(target=self._rx_streaming_thread)
+        rx_thread.start()
+
+        chunk_len = 128
+        samples_per_burst = ceil((self.sample_rate * 0.0285))  # some margin
+        burst_buffer = []
 
         print("\n--- Starting Stream Demodulation ---")
         print(f"Listening for bursts with power > {self.burst_threshold}")
 
         try:
             while True:
-                sr = self.sdr.readStream(
-                    self.rx_stream, [rx_buff], buff_len, timeoutUs=5000000
-                )
-                if sr.ret < 0:
-                    print(f"Error reading stream: {sr.ret}")
-                    continue
+                chunk = self.retrieve_samples(chunk_len)
+                
+                power = np.mean(np.abs(chunk))
 
-                t = np.arange(len(rx_buff[: sr.ret])) / self.sample_rate
-                mixing_signal = np.exp(1j * 2 * np.pi * self.shift_frequency * t)
-                rx_signal = rx_buff[: sr.ret] * mixing_signal
-                power = np.mean(np.abs(rx_signal))
-                process_this_burst = False
-
-                if in_burst:
-                    burst_buffer.append(rx_signal.copy())
-                    samples_in_burst += sr.ret
-                    if samples_in_burst >= samples_per_burst:
-                        full_burst = np.concatenate(burst_buffer)
-                        full_burst = self.low_pass(full_burst)
-                        print(len(full_burst))
-                        rolling_window = self.get_rolling_window(full_burst)[::-1]
-                        in_burst = False
-
-                        found = False
-                        idx = 0
-                        while idx < len(rolling_window) and not found:
-                            hex_string = self.demodulate_burst(rolling_window[idx])
-
-                            pattern = hex_string[27 : 27 + 12]
-                            if pattern in SYNC_PATTERNS.values():
-                                found = True
-                                print(f"--> HEX Output: {hex_string}\n")
-
-                            else:
-                                idx += 1
-                elif power > self.burst_threshold:
+                if power > self.burst_threshold:
                     print(f"--- Burst detected! (Power: {power:.4f}) ---")
-                    in_burst, samples_in_burst, silence_counter = True, sr.ret, 0
-                    burst_buffer = [rx_signal.copy()]
+                    burst_buffer = self.retrieve_samples(samples_per_burst - chunk_len)
+                    t = np.arange(len(burst_buffer)) / self.sample_rate
+                    mixing_signal = np.exp(1j * 2 * np.pi * self.shift_frequency * t)
+                    burst_buffer = burst_buffer * mixing_signal
 
-                    # on recentre le burst et on garde le nombre de sample exact pour le nombre de symboles
+                    full_burst = np.concatenate((chunk, burst_buffer))
+                    full_burst = self.low_pass(full_burst)
+                    rolling_window = self.get_rolling_window(full_burst)[::-1]
 
-                if process_this_burst:
-                    full_burst = np.concatenate(burst_buffer)
-                    # print(full_burst)
-                    # full_burst = self.recenter_array(full_burst)
-                    hex_data = self.demodulate_burst(full_burst)
-                    if hex_data:
-                        print(f"--> HEX Output: {hex_data}\n")
-                        sync = self.detect_sync_pattern(hex_data)
-                        print(sync)
-                    in_burst = False
-                    print(f"Listening for bursts with power > {self.burst_threshold}")
+                    found = False
+                    idx = 0
+                    while idx < len(rolling_window) and not found:
+                        hex_string = self.demodulate_burst(rolling_window[idx])
+
+                        pattern = hex_string[27 : 27 + 12]
+                        if pattern in SYNC_PATTERNS.values():
+                            found = True
+                            print(f"--> HEX Output: {hex_string}\n")
+
+                        else:
+                            idx += 1
 
         except KeyboardInterrupt:
             print("\nUser interrupted. Shutting down.")
+            self.listening_event.clear()
         finally:
             print("Deactivating stream...")
             self.sdr.deactivateStream(self.rx_stream)

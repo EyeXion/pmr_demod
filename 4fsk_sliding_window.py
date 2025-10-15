@@ -6,7 +6,7 @@ import time
 import matplotlib.pyplot as plt
 from math import ceil
 from threading import Thread, Event
-from queue import Queue
+import queue
 import argparse
 from datetime import datetime
 
@@ -181,7 +181,8 @@ class DMRStreamDemodulator:
 
         self.listening_event = Event()
         self.listening_event.set()
-        self.buffer_queue = Queue()
+        self.buffer_queue = queue.Queue()
+        self.leftover = np.empty(0)
 
         self.rawstore = args.rawstore
         self.explicitstore = args.explicitstore
@@ -190,10 +191,7 @@ class DMRStreamDemodulator:
         if self.rawstore or self.explicitstore:
             date = datetime.now().strftime("%Y%m%d_%H_%M_%S%m")
             path = (
-                "demodulated/DMRCapture_HackRF_"
-                + str(int(sample_rate))
-                + "Hz_"
-                + date
+                "demodulated/DMRCapture_HackRF_" + str(int(sample_rate)) + "Hz_" + date
             )
             self.file = open(path, "a")
             print("Save hex to {}".format(path))
@@ -522,14 +520,47 @@ class DMRStreamDemodulator:
     def get_rolling_window(self, rx_signal, window=132 * 10):
         return np.lib.stride_tricks.sliding_window_view(rx_signal, window)
 
-    def retrieve_samples(self, num_samples):
-        samples_retrieved = []
-        while num_samples > 0:
-            if not self.buffer_queue.empty():
-                chunk = self.buffer_queue.get()
-                samples_retrieved.append(chunk)
-                num_samples -= len(chunk)
-        return np.concatenate(samples_retrieved)
+    def retrieve_samples(self, n):
+        if n <= 0:
+            return np.empty(0, dtype=self.leftover.dtype)
+
+        parts = []
+        needed = n
+
+        # First consume leftover
+        if self.leftover.size:
+            take = min(needed, self.leftover.size)
+            if take == self.leftover.size:
+                parts.append(self.leftover)
+                self.leftover = np.empty(0, dtype=self.leftover.dtype)
+            else:
+                parts.append(self.leftover[:take])
+                self.leftover = self.leftover[take:]
+            needed -= take
+
+        # Pull from queue until we have enough
+        while needed > 0:
+            item = None
+            try:
+                item = self.buffer_queue.get(timeout=None)
+            except queue.Empty:
+                pass
+
+            # item is a numpy array
+            if item.size <= needed:
+                parts.append(item)
+                needed -= item.size
+            else:
+                # item has more than needed: take slice for return, keep rest as leftover
+                parts.append(item[:needed])
+                self.leftover = item[needed:].copy()  # copy to own memory
+                needed = 0
+
+        # Concatenate parts and return exact n samples
+        if len(parts) == 1:
+            return parts[0]
+        else:
+            return np.concatenate(parts, axis=0)
 
     def _rx_streaming_thread(self):
         buff_len = 4096
@@ -551,8 +582,8 @@ class DMRStreamDemodulator:
         rx_thread.start()
 
         chunk_len = 128
-        chunks_above_thresholdn_nb = int((0.0025 * self.sample_rate) / chunk_len)
-        samples_per_burst = ceil((self.sample_rate * 0.0275))  # some margin
+        chunks_above_thresholdn_nb = int((0.001 * self.sample_rate) / chunk_len)
+        samples_per_burst = ceil((self.sample_rate * 0.028))  # some margin
         burst_buffer = []
 
         last_rolling_window_idx = 0
@@ -587,12 +618,16 @@ class DMRStreamDemodulator:
                         if self.explicitstore:
                             self.file.write(burst_detected_alert)
 
+                        """
                         burst_buffer = self.retrieve_samples(
                             samples_per_burst
                             - (chunk_len * (chunks_above_thresholdn_nb + 1))
                         )
 
                         full_burst = np.concatenate((chunk, burst_buffer))
+                        """
+
+                        full_burst = self.retrieve_samples(samples_per_burst)
 
                         # Mixing (doesnt matter to align for power threshhold)
                         t = np.arange(len(full_burst)) / self.sample_rate
@@ -602,7 +637,7 @@ class DMRStreamDemodulator:
                         full_burst = full_burst * mixing_signal
 
                         full_burst = self.low_pass(full_burst)
-                        # self.plot_time(full_burst)
+                        #self.plot_time(full_burst)
                         rolling_window = self.get_rolling_window(full_burst)[::-1]
 
                         found = False
@@ -653,7 +688,7 @@ if __name__ == "__main__":
     demodulator = DMRStreamDemodulator(
         sample_rate=2.4e6,
         center_freq=433.000e6,
-        burst_threshold=0.6,
+        burst_threshold=0.9,
         silence_chunks=5,
         max_burst_duration=0.0275,
         enable_plotting=True,

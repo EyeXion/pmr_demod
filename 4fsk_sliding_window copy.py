@@ -13,7 +13,7 @@ from datetime import datetime
 # ================= #
 # Demodulator Class #
 # ================= #
-# SYMBOLS = np.array([0, 3, 1, -1, -3], dtype=int)
+#SYMBOLS = np.array([0, 3, 1, -1, -3], dtype=int)
 SYMBOLS = np.array([0, -3, -1, 1, 3], dtype=np.int32)
 
 
@@ -25,27 +25,28 @@ _SYMBOL_TO_BITS = {
 }
 
 TYPE_TO_SYNC_PATTERN = {
-    "BS_SOURCED_VOICE": "755FD7DF75F7",
-    "BS_SOURCED_DATA": "DFF57D75DF5D",
-    "MS_SOURCED_VOICE": "7F7D5DD57DFD",
-    "MS_SOURCED_DATA": "D5D7F77FD757",
-    "MS_SOURCED_RC": "77D55F7DFD77",
-    "TDMA_DIRECT_S1_VOICE": "5D577F7757FF",
-    "TDMA_DIRECT_S1_DATA": "F7FDD5DDFD55",
-    "TDMA_DIRECT_S2_VOICE": "7DFFD5F55D5F",
-    "TDMA_DIRECT_D2_DATA": "D7557F5FF7F5",
+    "BS_SOURCED_VOICE": "755fd7df75f7",
+    "BS_SOURCED_DATA": "dff57d75df5d",
+    "MS_SOURCED_VOICE": "7f7d5dd57dfd",
+    "MS_SOURCED_DATA": "d5d7f77fd757",
+    "MS_SOURCED_RC": "77d55f7dfd77",
+    "TDMA_DIRECT_S1_VOICE": "5d577f7757ff",
+    "TDMA_DIRECT_S1_DATA": "f7fdd5ddfd55",
+    "TDMA_DIRECT_S2_VOICE": "7dffd5f55d5f",
+    "TDMA_DIRECT_D2_DATA": "d7557f5ff7f5",
 }
 
+# faster to pre-reverse ? (idk)
 SYNC_PATTERN_TO_TYPE = {
-    "755FD7DF75F7": "BS_SOURCED_VOICE",
-    "DFF57D75DF5D": "BS_SOURCED_DATA",
-    "7F7D5DD57DFD": "MS_SOURCED_VOICE",
-    "D5D7F77FD757": "MS_SOURCED_DATA",
-    "77D55F7DFD77": "MS_SOURCED_RC",
-    "5D577F7757FF": "TDMA_DIRECT_S1_VOICE",
-    "F7FDD5DDFD55": "TDMA_DIRECT_S1_DATA",
-    "7DFFD5F55D5F": "TDMA_DIRECT_S2_VOICE",
-    "D7557F5FF7F5": "TDMA_DIRECT_D2_DATA",
+    "755fd7df75f7": "BS_SOURCED_VOICE",
+    "dff57d75df5d": "BS_SOURCED_DATA",
+    "7f7d5dd57dfd": "MS_SOURCED_VOICE",
+    "d5d7f77fd757": "MS_SOURCED_DATA",
+    "77d55f7dfd77": "MS_SOURCED_RC",
+    "5d577f7757ff": "TDMA_DIRECT_S1_VOICE",
+    "f7fdd5ddfd55": "TDMA_DIRECT_S1_DATA",
+    "7dffd5f55d5f": "TDMA_DIRECT_S2_VOICE",
+    "d7557f5ff7f5": "TDMA_DIRECT_D2_DATA",
 }
 
 parser = argparse.ArgumentParser()
@@ -187,13 +188,6 @@ class DMRStreamDemodulator:
         self.explicitstore = args.explicitstore
         self.file = None
 
-        # Amount of samples consumed so far
-        # Modulo sample rate (1s of sampling)
-        self.sample_amount = 0
-
-        self.last_burst_sample_position = None
-        self.last_burst_fine_timing = None
-
         if self.rawstore or self.explicitstore:
             date = datetime.now().strftime("%Y%m%d_%H_%M_%S%m")
             path = (
@@ -302,19 +296,12 @@ class DMRStreamDemodulator:
         """Initializes and configures the SDR."""
         print("Setting up SDR...")
         args = dict(driver="hackrf")
-        #args = dict(driver="lime")
         self.sdr = SoapySDR.Device(args)
         self.sdr.setSampleRate(SOAPY_SDR_RX, 0, self.sample_rate)
         self.sdr.setFrequency(SOAPY_SDR_RX, 0, self.center_freq)
         self.sdr.setGain(SOAPY_SDR_RX, 0, "AMP", 0)
         self.sdr.setGain(SOAPY_SDR_RX, 0, "LNA", 16)
         self.sdr.setGain(SOAPY_SDR_RX, 0, "VGA", 16)
-        """
-        self.sdr.setGain(SOAPY_SDR_RX, 0, "TIA", 12)
-        self.sdr.setGain(SOAPY_SDR_RX, 0, "LNA", 0)
-        self.sdr.setGain(SOAPY_SDR_RX, 0, "PGA", 0)
-        """
-
 
         self.rx_stream = self.sdr.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32)
         self.sdr.activateStream(self.rx_stream)
@@ -427,17 +414,17 @@ class DMRStreamDemodulator:
         nibble_vals = [int(bitstream[i * 4 : (i + 1) * 4], 2) for i in range(nnibbles)]
 
         # format as hex string (one hex digit per nibble)
-        return "".join(f"{n:x}" for n in nibble_vals).upper()
+        return "".join(f"{n:x}" for n in nibble_vals)
 
     def low_pass(self, data):
         low_pass = signal.butter(
             N=5, Wn=9.6e3, fs=self.sample_rate, output="sos", btype="low"
         )
 
-        rx_signal = signal.sosfiltfilt(sos=low_pass, x=data)
+        rx_signal = signal.sosfilt(sos=low_pass, x=data)
         # rx_signal = np.convolve(rx_signal, low_pass, "same")
         # We decimate by sample_rate/48khz, hence sample rate should be a multiple of 48k
-        rx_signal = signal.decimate(rx_signal, q=self.decimation, ftype="fir",zero_phase=True)
+        rx_signal = signal.decimate(rx_signal, q=self.decimation, ftype="fir")
         return rx_signal
 
     def demodulate_burst(self, burst_data):
@@ -446,76 +433,23 @@ class DMRStreamDemodulator:
         # =============== #
 
         rx_signal = burst_data
-        sample_rate = int(self.sample_rate / self.decimation)
-
-        # =============================== #
-        # Instant frequencies calculation #
-        # =============================== #
-
-        samples_per_symbol = sample_rate // 4800
-        instant_phases = np.unwrap(np.angle(rx_signal), axis=0)
-        instant_frequencies = np.diff(instant_phases)
-
-        time_axis = np.arange(len(instant_frequencies) // samples_per_symbol)
-
-        # ========================= #
-        # Raised Root Cosine Filter #
-        # ========================= #
-        
-        # Le RRC est pas stable au début je pense, on ajoute du padding pour avoir
-        # un transient qui touche les trucs qui servent à rien
-        # Calculate filter group delay (half the filter length)
-        filter_delay = (len(self.RRCOS_FILTER) - 1) // 2
-        
-        pad_length = filter_delay + samples_per_symbol * 10  # Extra margin for safety
-        
-        padding = instant_frequencies[:pad_length][::-1]  # Reverse first samples
-        
-        padded_signal = np.concatenate([padding, instant_frequencies])
-        
-        # Apply RRC filter to padded signal
-        filtered_signal = signal.lfilter(self.RRCOS_FILTER, 1, padded_signal)
-        
-        # Remove the padding to get back to original length
-        instant_frequencies = filtered_signal[pad_length:]
-
-        # ======================================================= #
-        #  Standard deviation to choose sample per symbol to use #
-        # ======================================================= #
-
-        offset, std = self.find_best_phase_offset_and_std(
-            instant_frequencies, samples_per_symbol
-        )
-
-        sampled_frequencies = instant_frequencies[offset::samples_per_symbol]
-        bins = self.create_frequency_bins(sampled_frequencies)
-
-        out = self.frequencies_to_symbols(sampled_frequencies, bins)
-        symbols = out["symbol"]
-        hex_output = self.symbols_to_hex(symbols)
-
-        return hex_output, offset
-
-    """
-    def demodulate_burst(self, burst_data):
-        # =============== #
-        # Low Pass Filter #
-        # =============== #
-
-        rx_signal = burst_data
 
         # We need to apply a low pass filter in order to have a 48kHz sample rate
-        #low_pass = signal.firwin(
-        #    nb_taps,
-        #    4.8e3,
-        #    fs=sample_rate,
-        #)
+        """
+        low_pass = signal.firwin(
+            nb_taps,
+            4.8e3,
+            fs=sample_rate,
+        )
+        """
         # low_pass = signal.butter(
         #    N=5, Wn=9.6e3, fs=self.sample_rate, output="sos", btype="low"
         # )
-        #low_pass = signal.cheby1(
-        #    N=5, rp=2, Wn=9.6e3, btype="lowpass", output="sos", fs=sample_rate
-        #)
+        """
+        low_pass = signal.cheby1(
+            N=5, rp=2, Wn=9.6e3, btype="lowpass", output="sos", fs=sample_rate
+        )
+        """
 
         # rx_signal = signal.sosfilt(sos=low_pass, x=rx_signal)
         # rx_signal = np.convolve(rx_signal, low_pass, "same")
@@ -544,8 +478,6 @@ class DMRStreamDemodulator:
         # si je transforme en hz, j'ai des valeurs très petites d'IF. Ok chaque sample est très proche mais j'ai "que" 10 sps...
         # en soit ça change rien mais y'a ptetre un pb, les valeurs me paraissent bizarres
 
-        time_axis = np.arange(len(instant_frequencies) // samples_per_symbol)
-
         # ========================= #
         # Raised Root Cosine Filter #
         # ========================= #
@@ -570,20 +502,20 @@ class DMRStreamDemodulator:
         symbols = out["symbol"]
         hex_output = self.symbols_to_hex(symbols)
 
-        #self.plot_burst_analysis(
-        #    rx_signal,
-        #    instant_frequencies,
-        #    sampled_frequencies,
-        #    bins,
-        #    samples_per_symbol,
-        #)
-
-        return hex_output, offset
+        """
+        self.plot_burst_analysis(
+            rx_signal,
+            instant_frequencies,
+            sampled_frequencies,
+            bins,
+            samples_per_symbol,
+        )
         """
 
+        return (hex_output, sampled_frequencies, instant_frequencies, bins)
+
     # 132 SYMBOL par burst, et 10 samples par symboles donc window de 1 samples (en gros)
-    # J'ai mis 136 pour avoir de la marge (et on enlève un symbole au début et 1 à la fin et au début après la demod)
-    def get_rolling_window(self, rx_signal, window=138 * 10):
+    def get_rolling_window(self, rx_signal, window=132 * 10):
         return np.lib.stride_tricks.sliding_window_view(rx_signal, window)
 
     def retrieve_samples(self, n):
@@ -626,9 +558,7 @@ class DMRStreamDemodulator:
         if len(parts) == 1:
             return parts[0]
         else:
-            chunk = np.concatenate(parts, axis=0)
-            self.sample_amount += len(chunk) % int(self.sample_rate)
-            return chunk
+            return np.concatenate(parts, axis=0)
 
     def _rx_streaming_thread(self):
         buff_len = 4096
@@ -650,14 +580,12 @@ class DMRStreamDemodulator:
         rx_thread.start()
 
         chunk_len = 128
-        chunks_above_thresholdn_nb = int((0.0002 * self.sample_rate) / chunk_len) - 1
-        samples_per_burst = ceil((self.sample_rate * 0.0295))  # some margin
+        chunks_above_thresholdn_nb = int((0.001 * self.sample_rate) / chunk_len)
+        samples_per_burst = ceil((self.sample_rate * 0.028))  # some margin
         burst_buffer = []
 
         last_rolling_window_idx = 0
-        last_offset_in_std = 0
-        samples_before_next_chunk = 0.03 * self.sample_rate
-        sample_rate_int = int(self.sample_rate)
+
         print("\n--- Starting Stream Demodulation ---")
         print(f"Listening for bursts with power > {self.burst_threshold}")
 
@@ -706,32 +634,36 @@ class DMRStreamDemodulator:
                         full_burst = full_burst * mixing_signal
 
                         full_burst = self.low_pass(full_burst)
-                        #self.plot_time(full_burst)
-                        rolling_window = self.get_rolling_window(full_burst)
+                        # self.plot_time(full_burst)
+                        rolling_window = self.get_rolling_window(full_burst)[::-1]
 
                         found = False
                         idx = 0
                         while idx < len(rolling_window) and not found:
-                            hex_string, offset = self.demodulate_burst(
-                                rolling_window[idx]
-                            )
-                            hex_string = hex_string[2:-1]
+                            (
+                                hex_string,
+                                sampled_frequencies,
+                                instant_frequencies,
+                                bins,
+                            ) = self.demodulate_burst(rolling_window[idx])
 
                             pattern = hex_string[27 : 27 + 12]
                             if pattern in SYNC_PATTERN_TO_TYPE.keys():
                                 found = True
                                 last_rolling_window_idx = idx
-                                last_offset_in_std = offset
-
-                                # Calculate the exact sample position of burst start
-                                burst_start_in_window = len(rolling_window) - idx - 1
-                                self.last_burst_sample_position = self.sample_amount - len(full_burst) + burst_start_in_window
-                                self.last_burst_fine_timing = offset
-
                                 burst_type = "--> Burst Type : %s" % (
                                     SYNC_PATTERN_TO_TYPE[pattern]
                                 )
                                 print(burst_type)
+                                """
+                                self.plot_burst_analysis(
+                                    full_burst,
+                                    instant_frequencies,
+                                    sampled_frequencies,
+                                    bins,
+                                    10,
+                                )
+                                """
 
                                 if self.explicitstore:
                                     self.file.write(burst_type)
@@ -739,32 +671,18 @@ class DMRStreamDemodulator:
                             else:
                                 idx += 1
 
-                        if not found and self.last_burst_sample_position is not None:
-                            # If not sync not found, take the start of previous frame  + 30ms
-                            expected_burst_spacing = int(0.030 * self.sample_rate)  
-                            current_position = self.sample_amount - len(full_burst)
-        
-                            # Find how many bursts have passed
-                            bursts_elapsed = round((current_position - self.last_burst_sample_position) / expected_burst_spacing)
-        
-                            # Calculate expected sample offset in current window
-                            expected_position = self.last_burst_sample_position + (bursts_elapsed * expected_burst_spacing)
-                            offset_from_window_start = expected_position - (current_position)
-        
-                            # Convert to rolling window index
-                            idx = len(rolling_window) - 1 - offset_from_window_start
-                            idx = np.clip(idx, 0, len(rolling_window) - 1)
-        
+                        if not found:
+                            (
+                                hex_string,
+                                sampled_frequencies,
+                                instant_frequencies,
+                                bins,
+                            ) = self.demodulate_burst(
+                                rolling_window[last_rolling_window_idx]
+                            )
 
-                            # On a 10 valeurs possibles d'offset, donc on prend en avance ou retard du last
-                            hex_string, offset = self.demodulate_burst(rolling_window[idx])
-                            hex_string = hex_string[2:-1]
-
-                        hex_output = f"\n--> HEX Output: {hex_string}\n"
+                        hex_output = f"--> HEX Output: {hex_string}\n"
                         print(hex_output)
-
-                        print(idx)
-                        print(offset)
 
                         if self.explicitstore:
                             self.file.write(hex_output)
@@ -772,11 +690,12 @@ class DMRStreamDemodulator:
                             self.file.write(hex_string + "\n")
 
         except KeyboardInterrupt:
-            print("\nOn est gentils on fait les exceptions")
+            print("\nUser interrupted. Shutting down.")
             self.listening_event.clear()
             if self.file is not None:
                 self.file.close()
         finally:
+            print("Deactivating stream...")
             self.sdr.deactivateStream(self.rx_stream)
             self.sdr.closeStream(self.rx_stream)
 
@@ -785,7 +704,7 @@ if __name__ == "__main__":
     demodulator = DMRStreamDemodulator(
         sample_rate=2.4e6,
         center_freq=433.000e6,
-        burst_threshold=0.9,
+        burst_threshold=0.4,
         silence_chunks=5,
         max_burst_duration=0.0275,
         enable_plotting=True,
